@@ -1,5 +1,7 @@
+import crypto from "node:crypto";
 import { Location } from "../models/location.model.js";
 import verifyLocationAccess from "../middleware/verifyLocationAccess.js";
+import { provisionLocalAdmin } from "../service/provisionLocalAdmin.js";
 
 export default async function locationRoutes(fastify) {
     // Get all locations
@@ -64,14 +66,22 @@ export default async function locationRoutes(fastify) {
     // Add location
    fastify.post("/", { preHandler: verifyLocationAccess }, async (req, reply) => {
   try {
-    const { externalId, schoolCode, name, location, baseUrl } = req.body;
+    const { name, location, baseUrl } = req.body;
     // Basic validation
-    if (!externalId || !name || !location || !baseUrl) {
+    if (!name || !location || !baseUrl) {
       return reply.code(400).send({
         status: false,
         message: "Missing required fields"
       });
     }
+
+    // A local server pushing its own location up always sends its own record id
+    // as externalId (see syncGlobalLocationService.js), which doubles as the
+    // idempotency key below. A Super Admin creating a location directly here has
+    // no such id to give, so one is generated — it gets replaced with the real
+    // local record id once auto-provisioning (below) finishes.
+    const externalId = req.body.externalId || crypto.randomUUID();
+    const schoolCode = req.body.schoolCode || `SCH-${crypto.randomBytes(4).toString("hex").toUpperCase()}`;
 
     // Idempotency check (CRITICAL)
     const existing = await Location.findOne({ externalId });
@@ -89,7 +99,15 @@ export default async function locationRoutes(fastify) {
       baseUrl
     });
 
-    return reply.code(201).send(newLocation);
+    // Only auto-provision when a human created this here (req.isInternalService
+    // is only set for calls authenticated via the shared service key, i.e. a
+    // local server syncing its own already-admin-owned location up).
+    let adminProvisioning = null;
+    if (!req.isInternalService) {
+      adminProvisioning = await provisionLocalAdmin(newLocation);
+    }
+
+    return reply.code(201).send({ ...newLocation.toObject(), adminProvisioning });
 
   } catch (error) {
     // Handle duplicate schoolCode explicitly
