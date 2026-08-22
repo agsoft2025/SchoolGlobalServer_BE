@@ -1,8 +1,9 @@
 import { Location } from "../models/location.model.js";
+import verifyLocationAccess from "../middleware/verifyLocationAccess.js";
 
 export default async function locationRoutes(fastify) {
     // Get all locations
-    fastify.get("/", async (request, reply) => {
+    fastify.get("/", { preHandler: verifyLocationAccess }, async (request, reply) => {
         try {
             const {
                 search = "",       // for name or location search
@@ -61,7 +62,7 @@ export default async function locationRoutes(fastify) {
     });
 
     // Add location
-   fastify.post("/", async (req, reply) => {
+   fastify.post("/", { preHandler: verifyLocationAccess }, async (req, reply) => {
   try {
     const { externalId, schoolCode, name, location, baseUrl } = req.body;
     // Basic validation
@@ -107,7 +108,7 @@ export default async function locationRoutes(fastify) {
 });
 
     // Update location
-    fastify.put("/:externalId", async (req, reply) => {
+    fastify.put("/:externalId", { preHandler: verifyLocationAccess }, async (req, reply) => {
   try {
     const { externalId } = req.params;
     const { name, location, baseUrl, amount, schoolCode } = req.body;
@@ -191,13 +192,13 @@ export default async function locationRoutes(fastify) {
     // });
 
     // Delete location
-    fastify.delete("/:id", async (req, reply) => {
+    fastify.delete("/:id", { preHandler: verifyLocationAccess }, async (req, reply) => {
         await Location.findByIdAndDelete(req.params.id);
         reply.send({ message: "Location deleted successfully" });
     });
 
-    // Delete location
-    fastify.get("/:id", async (req, reply) => {
+    // Get single location
+    fastify.get("/:id", { preHandler: verifyLocationAccess }, async (req, reply) => {
         const locationData = await Location.findById(req.params.id);
         reply.code(200).send({ status: true, data: locationData, message: "Location deleted successfully" });
     });
