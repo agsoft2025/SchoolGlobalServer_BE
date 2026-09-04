@@ -66,12 +66,15 @@ export default async function locationRoutes(fastify) {
     // Add location
    fastify.post("/", { preHandler: verifyLocationAccess }, async (req, reply) => {
   try {
-    const { name, location, baseUrl } = req.body;
+    const { name, location } = req.body;
+    // Base URL is no longer configured per location (one common URL is shared by
+    // all local servers); fall back to the shared value when absent.
+    const baseUrl = req.body.baseUrl || process.env.COMMON_BASE_URL || "";
     // Basic validation
-    if (!name || !location || !baseUrl) {
+    if (!name || !location) {
       return reply.code(400).send({
         status: false,
-        message: "Missing required fields"
+        message: "name and location are required"
       });
     }
 
@@ -99,15 +102,15 @@ export default async function locationRoutes(fastify) {
       baseUrl
     });
 
-    // Only auto-provision when a human created this here (req.isInternalService
-    // is only set for calls authenticated via the shared service key, i.e. a
-    // local server syncing its own already-admin-owned location up).
-    let adminProvisioning = null;
+    // Mirror the location down to the local server only when a human created
+    // this here (req.isInternalService is only set for calls authenticated via
+    // the shared service key, i.e. a local server syncing its own location up).
+    let locationSync = null;
     if (!req.isInternalService) {
-      adminProvisioning = await provisionLocalAdmin(newLocation);
+      locationSync = await provisionLocalAdmin(newLocation);
     }
 
-    return reply.code(201).send({ ...newLocation.toObject(), adminProvisioning });
+    return reply.code(201).send({ ...newLocation.toObject(), locationSync });
 
   } catch (error) {
     // Handle duplicate schoolCode explicitly

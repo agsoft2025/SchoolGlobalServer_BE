@@ -31,9 +31,13 @@ const locationSchema = new mongoose.Schema(
       trim: true
     },
 
+    // Optional: one common base URL is shared by all local servers today, so it
+    // is not configured per location. Kept on the schema so a per-server URL can
+    // be introduced later without a migration.
     baseUrl: {
       type: String,
-      required: true
+      required: false,
+      default: ""
     },
 
     amount: {
