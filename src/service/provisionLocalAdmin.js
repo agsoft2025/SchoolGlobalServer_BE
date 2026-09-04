@@ -8,9 +8,21 @@ import { Location } from "../models/location.model.js";
 // process.env is read here (not at module load) for the same reason noted in
 // verifyLocationAccess.js: this module can be evaluated before dotenv.config().
 export async function provisionLocalAdmin(location) {
+  // Read + normalise the local server base URL here (not at module load); a
+  // missing or scheme-less value is the usual cause of an axios "Invalid URL"
+  // that otherwise surfaces to the user as an opaque sync failure.
+  const baseUrl = (process.env.LOCAL_SCHOOL_SERVER_URL || "").trim().replace(/\/+$/, "");
+  if (!/^https?:\/\//i.test(baseUrl)) {
+    return {
+      status: "failed",
+      message:
+        "LOCAL_SCHOOL_SERVER_URL is not configured on the Global server (must be an absolute http(s) URL). Set it and restart the service.",
+    };
+  }
+
   try {
     const res = await axios.post(
-      `${process.env.LOCAL_SCHOOL_SERVER_URL}/internal/provision-location`,
+      `${baseUrl}/internal/provision-location`,
       {
         schoolName: location.name,
         locationName: location.location,

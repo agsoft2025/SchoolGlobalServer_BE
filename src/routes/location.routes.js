@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import mongoose from "mongoose";
 import { Location } from "../models/location.model.js";
 import verifyLocationAccess from "../middleware/verifyLocationAccess.js";
 import { provisionLocalAdmin } from "../service/provisionLocalAdmin.js";
@@ -157,25 +158,50 @@ export default async function locationRoutes(fastify) {
       ...(amount !== undefined && { amount })
     };
 
-    // 🔑 UPSERT: update if exists, create if not
-    const updated = await Location.findOneAndUpdate(
-      { externalId },               // identity
-      {
-        $set: updateData,
-        $setOnInsert: {
-          externalId // ensure stored on create
-        }
-      },
-      {
-        new: true,
-        upsert: true // THIS is the key
-      }
+    // Resolve identity. The Global panel addresses a location by its Mongo _id;
+    // the local-server sync-up path (req.isInternalService) addresses it by
+    // externalId (its own record id) and relies on create-if-missing. Matching
+    // only on externalId here meant a Global-panel edit of an already-synced
+    // location (externalId = local id, not _id) matched nothing and upserted a
+    // duplicate junk row.
+    const identity = mongoose.isValidObjectId(externalId)
+      ? { $or: [{ _id: externalId }, { externalId }] }
+      : { externalId };
+
+    let updated = await Location.findOneAndUpdate(
+      identity,
+      { $set: updateData },
+      { new: true }
     );
+
+    // Only the trusted local-server path is allowed to create a location it
+    // can't find; a Super Admin editing from the panel should get a clear 404.
+    if (!updated) {
+      if (!req.isInternalService) {
+        return reply.code(404).send({ status: false, message: "Location not found" });
+      }
+      updated = await Location.findOneAndUpdate(
+        { externalId },
+        { $set: updateData, $setOnInsert: { externalId } },
+        { new: true, upsert: true }
+      );
+    }
+
+    // Re-mirror the location down to the local server on every human edit. This
+    // is idempotent on the local side (upsert keyed by global_location_id) and
+    // backfills locations whose original create-time sync failed, so they show
+    // up in the local server's Add Admin dropdown. Skipped for internal
+    // service calls (a local server pushing its own change up).
+    let locationSync = null;
+    if (!req.isInternalService) {
+      locationSync = await provisionLocalAdmin(updated);
+    }
 
     return reply.code(200).send({
       status: true,
       data: updated,
-      message: "Location upserted successfully"
+      locationSync,
+      message: "Location updated successfully"
     });
 
   } catch (error) {
