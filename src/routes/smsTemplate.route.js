@@ -3,7 +3,7 @@ import SmsTemplate from "../models/smsTemplate.model.js";
 import SmsTemplateAudit from "../models/smsTemplateAudit.model.js";
 import verifySuperAdmin from "../middleware/verifySuperAdmin.js";
 import verifyInternalService from "../middleware/verifyInternalService.js";
-import { countPlaceholders, defaultFields } from "../utils/dltTemplate.js";
+import { countPlaceholders, normalizeFields } from "../utils/dltTemplate.js";
 
 // This portal manages SCHOOL templates only. INMATE stays isolated: it is a
 // valid enum value on the model for the future, but no route here reads or
@@ -152,6 +152,9 @@ export default async function smsTemplateRoutes(fastify) {
         return reply.code(400).send({ success: false, message: "A DLT Template ID is required to activate a template" });
       }
 
+      const spec = normalizeFields(approvedText, fields);
+      if (!spec.ok) return reply.code(400).send({ success: false, message: spec.error });
+
       const dup = await SmsTemplate.findOne({ domain: MANAGED_DOMAIN, name: name.trim(), deletedAt: null });
       if (dup) return reply.code(409).send({ success: false, message: "A template with this name already exists" });
 
@@ -162,7 +165,7 @@ export default async function smsTemplateRoutes(fastify) {
         dltTemplateId: String(dltTemplateId).trim(),
         approvedText: approvedText.trim(),
         placeholderCount: countPlaceholders(approvedText),
-        fields: Array.isArray(fields) && fields.length ? fields : defaultFields(approvedText),
+        fields: spec.fields,
         status: status === "ACTIVE" ? "ACTIVE" : "INACTIVE",
         version: 1,
         createdBy: { id: req.user.id, username: req.user.username },
@@ -210,7 +213,8 @@ export default async function smsTemplateRoutes(fastify) {
 
       let structuralChange = false;
 
-      if (approvedText !== undefined && approvedText.trim() !== t.approvedText) {
+      const textChanged = approvedText !== undefined && approvedText.trim() !== t.approvedText;
+      if (textChanged) {
         if (!approvedText.trim()) {
           return reply.code(400).send({ success: false, message: "Approved template text cannot be empty" });
         }
@@ -220,12 +224,20 @@ export default async function smsTemplateRoutes(fastify) {
             .send({ success: false, message: "Approved text must contain at least one {#...#} placeholder" });
         }
         t.approvedText = approvedText.trim();
-        t.placeholderCount = countPlaceholders(approvedText);
-        if (!Array.isArray(fields) || !fields.length) t.fields = defaultFields(approvedText);
+        t.placeholderCount = countPlaceholders(t.approvedText);
         structuralChange = true;
       }
 
-      if (Array.isArray(fields) && fields.length) t.fields = fields;
+      // Re-derive the slot spec whenever the caller sends one, or whenever the
+      // approved text changed shape (so fields can never drift out of sync with
+      // the {#...#} slots the School server will try to fill).
+      if (fields !== undefined || textChanged) {
+        // fields === undefined here only when textChanged: normalizeFields then
+        // regenerates the default one-input-per-slot spec for the new text.
+        const spec = normalizeFields(t.approvedText, fields);
+        if (!spec.ok) return reply.code(400).send({ success: false, message: spec.error });
+        t.fields = spec.fields;
+      }
 
       if (dltTemplateId !== undefined && String(dltTemplateId).trim() !== t.dltTemplateId) {
         t.dltTemplateId = String(dltTemplateId).trim();
