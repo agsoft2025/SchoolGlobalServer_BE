@@ -1,6 +1,8 @@
 import mongoose from "mongoose";
 import SmsTemplate from "../models/smsTemplate.model.js";
 import SmsTemplateAudit from "../models/smsTemplateAudit.model.js";
+import SenderId from "../models/senderId.model.js";
+import SchoolSmsConfig from "../models/schoolSmsConfig.model.js";
 import verifySuperAdmin from "../middleware/verifySuperAdmin.js";
 import verifyInternalService from "../middleware/verifyInternalService.js";
 import { countPlaceholders, normalizeFields } from "../utils/dltTemplate.js";
@@ -16,6 +18,7 @@ const shape = (t) => ({
   description: t.description,
   domain: t.domain,
   dltTemplateId: t.dltTemplateId,
+  senderId: t.senderId || "",
   approvedText: t.approvedText,
   placeholderCount: t.placeholderCount,
   fields: t.fields,
@@ -44,6 +47,17 @@ const writeAudit = async (action, tpl, before, after, user) => {
   }
 };
 
+// A template may only go ACTIVE with a sender header that resolves to an ACTIVE,
+// non-deleted SenderId in the same domain. Returns { ok, error }.
+const assertUsableSender = async (header) => {
+  const h = String(header || "").trim().toUpperCase();
+  if (!h) return { ok: false, error: "A Sender ID is required to activate a template" };
+  const sender = await SenderId.findOne({ domain: MANAGED_DOMAIN, header: h, deletedAt: null });
+  if (!sender) return { ok: false, error: `Sender ID "${h}" is not registered` };
+  if (sender.status !== "ACTIVE") return { ok: false, error: `Sender ID "${h}" is not active` };
+  return { ok: true };
+};
+
 export default async function smsTemplateRoutes(fastify) {
   // ------------------------------------------------------------------
   // INTERNAL — local school servers pull approved templates (read only)
@@ -51,16 +65,57 @@ export default async function smsTemplateRoutes(fastify) {
   // ------------------------------------------------------------------
   fastify.get("/internal/active", { preHandler: verifyInternalService }, async (req, reply) => {
     try {
-      const rows = await SmsTemplate.find({
+      const { externalId, schoolCode } = req.query || {};
+      const DEFAULT_HEADER = (process.env.DEFAULT_SMS_SENDER_ID || "AGSWSL").trim().toUpperCase();
+
+      const filter = {
         domain: MANAGED_DOMAIN,
         status: "ACTIVE",
         deletedAt: null,
         dltTemplateId: { $nin: ["", null] },
-      })
-        .sort({ name: 1 })
-        .lean();
+        senderId: { $nin: ["", null] },
+      };
 
-      return reply.code(200).send({ success: true, data: rows.map(shape) });
+      // Per-school scoping by assigned Sender ID(s):
+      //   config row present  -> senderId ∈ assignedSenderIds  ([] => nothing)
+      //   no config row       -> GRACE: the historical default sender only
+      // (never "all" — a template's sender must be one the school may use).
+      const meta = { assignedSenderIds: [], source: "fallback" };
+      if (externalId || schoolCode) {
+        const cfg = externalId
+          ? await SchoolSmsConfig.findOne({ externalId }).lean()
+          : await SchoolSmsConfig.findOne({ schoolCode }).lean();
+        if (cfg) {
+          meta.source = "config";
+          meta.assignedSenderIds = cfg.assignedSenderIds || [];
+        } else {
+          meta.assignedSenderIds = [DEFAULT_HEADER];
+        }
+        filter.senderId = { $in: meta.assignedSenderIds };
+      }
+
+      let rows = await SmsTemplate.find(filter).sort({ name: 1 }).lean();
+
+      // Drop templates whose sender is no longer an ACTIVE SenderId (covers a
+      // header deactivated/deleted after it was assigned).
+      if (rows.length) {
+        const headers = [...new Set(rows.map((r) => r.senderId))];
+        const activeHeaders = new Set(
+          (
+            await SenderId.find({
+              domain: MANAGED_DOMAIN,
+              header: { $in: headers },
+              status: "ACTIVE",
+              deletedAt: null,
+            })
+              .select("header")
+              .lean()
+          ).map((s) => s.header)
+        );
+        rows = rows.filter((r) => activeHeaders.has(r.senderId));
+      }
+
+      return reply.code(200).send({ success: true, data: rows.map(shape), meta });
     } catch (error) {
       return reply.code(500).send({ success: false, message: "Failed to load templates", error: error.message });
     }
@@ -129,6 +184,7 @@ export default async function smsTemplateRoutes(fastify) {
         description = "",
         domain = MANAGED_DOMAIN,
         dltTemplateId = "",
+        senderId = "",
         approvedText,
         status = "INACTIVE",
         fields,
@@ -151,6 +207,10 @@ export default async function smsTemplateRoutes(fastify) {
       if (status === "ACTIVE" && !String(dltTemplateId).trim()) {
         return reply.code(400).send({ success: false, message: "A DLT Template ID is required to activate a template" });
       }
+      if (status === "ACTIVE") {
+        const senderCheck = await assertUsableSender(senderId);
+        if (!senderCheck.ok) return reply.code(400).send({ success: false, message: senderCheck.error });
+      }
 
       const spec = normalizeFields(approvedText, fields);
       if (!spec.ok) return reply.code(400).send({ success: false, message: spec.error });
@@ -163,6 +223,7 @@ export default async function smsTemplateRoutes(fastify) {
         description: String(description).trim(),
         domain: MANAGED_DOMAIN,
         dltTemplateId: String(dltTemplateId).trim(),
+        senderId: String(senderId).trim().toUpperCase(),
         approvedText: approvedText.trim(),
         placeholderCount: countPlaceholders(approvedText),
         fields: spec.fields,
@@ -192,7 +253,7 @@ export default async function smsTemplateRoutes(fastify) {
       if (!t) return reply.code(404).send({ success: false, message: "Template not found" });
 
       const before = shape(t);
-      const { name, description, dltTemplateId, approvedText, status, fields, domain } = req.body || {};
+      const { name, description, dltTemplateId, senderId, approvedText, status, fields, domain } = req.body || {};
 
       if (domain !== undefined && domain !== t.domain) {
         return reply.code(400).send({ success: false, message: "Template domain cannot be changed" });
@@ -244,6 +305,11 @@ export default async function smsTemplateRoutes(fastify) {
         structuralChange = true;
       }
 
+      if (senderId !== undefined && String(senderId).trim().toUpperCase() !== t.senderId) {
+        t.senderId = String(senderId).trim().toUpperCase();
+        structuralChange = true;
+      }
+
       if (status !== undefined && status !== t.status) {
         if (!["ACTIVE", "INACTIVE"].includes(status)) {
           return reply.code(400).send({ success: false, message: "Invalid status" });
@@ -253,11 +319,15 @@ export default async function smsTemplateRoutes(fastify) {
             .code(400)
             .send({ success: false, message: "A DLT Template ID is required to activate a template" });
         }
+        if (status === "ACTIVE") {
+          const senderCheck = await assertUsableSender(t.senderId);
+          if (!senderCheck.ok) return reply.code(400).send({ success: false, message: senderCheck.error });
+        }
         t.status = status;
       }
 
-      // Clearing the DLT id must never leave an ACTIVE template behind.
-      if (!t.dltTemplateId && t.status === "ACTIVE") t.status = "INACTIVE";
+      // Clearing the DLT id or sender must never leave an ACTIVE template behind.
+      if ((!t.dltTemplateId || !t.senderId) && t.status === "ACTIVE") t.status = "INACTIVE";
 
       if (structuralChange) t.version += 1;
       t.updatedBy = { id: req.user.id, username: req.user.username };
@@ -287,6 +357,10 @@ export default async function smsTemplateRoutes(fastify) {
       if (!t) return reply.code(404).send({ success: false, message: "Template not found" });
       if (status === "ACTIVE" && !t.dltTemplateId) {
         return reply.code(400).send({ success: false, message: "A DLT Template ID is required to activate a template" });
+      }
+      if (status === "ACTIVE") {
+        const senderCheck = await assertUsableSender(t.senderId);
+        if (!senderCheck.ok) return reply.code(400).send({ success: false, message: senderCheck.error });
       }
 
       const before = shape(t);

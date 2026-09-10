@@ -38,6 +38,12 @@ const smsTemplateSchema = new mongoose.Schema(
     // a template cannot be ACTIVE without it.
     dltTemplateId: { type: String, default: "", trim: true },
 
+    // The DLT-approved sender header this content template is registered under
+    // (e.g. AGSWSL). Must match an ACTIVE SenderId.header. Empty until
+    // configured; a template cannot be ACTIVE without it. The School Admin never
+    // picks a sender — it is derived from the template at send time.
+    senderId: { type: String, default: "", trim: true, uppercase: true },
+
     // The exact DLT-approved message, including the signature. Immutable content
     // apart from the {#...#} slots. Never assembled on the client.
     approvedText: { type: String, required: true, trim: true },
