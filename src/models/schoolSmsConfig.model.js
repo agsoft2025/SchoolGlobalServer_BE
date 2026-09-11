@@ -29,9 +29,11 @@ const schoolSmsConfigSchema = new mongoose.Schema(
 
     // DLT-approved sender headers this school may send under. Each must match an
     // ACTIVE SenderId.header. Empty array = explicitly disabled.
-    assignedSenderIds: {
-      type: [{ type: String, trim: true, uppercase: true }],
-      default: [],
+    assignedSenderId: {
+      type: String,
+      trim: true,
+      uppercase: true,
+      default: "",
     },
 
     updatedBy: { type: actorSchema },
